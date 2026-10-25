@@ -1,0 +1,17 @@
+{
+  "name": "pi-openrig-context",
+  "version": "0.1.0",
+  "description": "Pi extension that publishes a seat's context usage to the OpenRig context-usage sidecar",
+  "type": "module",
+  "private": true,
+  "keywords": ["pi-package", "pi", "openrig", "extension"],
+  "pi": {
+    "extensions": ["./extensions/openrig-context-usage.ts"]
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types \"test/*.test.ts\""
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  }
+}
