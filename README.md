@@ -53,7 +53,7 @@ Where a value comes from:
 | field | source |
 | --- | --- |
 | `context_window_size` | `getContextUsage().contextWindow` |
-| `used_percentage` | `getContextUsage().percent`, clamped to 0..100 |
+| `used_percentage` | `getContextUsage().percent`, clamped to 0..100 and rounded to a whole number |
 | `remaining_percentage` | `100 - used_percentage` |
 | `total_input_tokens` | `getContextUsage().tokens` — what is in the window |
 | `total_output_tokens` | always `null`: Pi's context usage does not split output out |
@@ -72,13 +72,24 @@ An unknown value stays `null`. It never becomes `0`, because a zero reads as an 
 Three moments, and nothing else:
 
 - `session_start`
-- `message_end` for an assistant message — that is, after each model call
+- `turn_end` — that is, after each model call
 - `session_compact`
+
+`turn_end` and not `message_end`, deliberately: Pi awaits extensions before it persists the assistant
+message, so at `message_end` the context still lacks the very call being reported and every reading
+would lag one call behind — Pi would show 95% while the sidecar said 40%. `turn_end` is dispatched
+only once the message has a persisted entry, which is the reading Pi itself shows.
 
 Nothing is written while tokens stream, so the extension adds no per-token work to the seat. Two
 writes of the same percentage within one second collapse into one; a changed percentage always
 writes, and a compaction always writes because the reading it replaces is the one that must not
 survive.
+
+The percentage is written rounded to a whole number. Pi computes `tokens / contextWindow * 100`,
+which is a float such as `39.900000000000006`, and OpenRig prints `used_percentage` as written in
+`rig ps --nodes`, `rig whoami` and `rig usage` (only the TUI rounds). Claude's status line and
+OpenRig's own Codex normaliser hand over whole numbers, so the writer rounds to keep a Pi seat in the
+same shape. The exact figure stays in `current_usage.percent`.
 
 Pi reports an unknown context immediately after a compaction, before the next model response. In
 that case the extension writes an explicit "no reading" sample (`used_percentage: null`) rather
@@ -86,12 +97,27 @@ than leaving the pre-compaction percentage standing as if it were still current 
 a compaction is worse than an honest unknown. At the other two moments, an unknown reading writes
 nothing at all, so a good sample is never replaced by an empty one.
 
+## No seat, no file
+
+A plain Pi session that loaded this extension from a user extensions directory is not an OpenRig
+seat: it has no seat-shaped `PI_CODING_AGENT_DIR` and no `OPENRIG_SESSION_NAME`. Writing anyway would
+put a file named `pi-<pid>.json` under `~/.openrig/state/context-usage/` — one per process, never
+cleaned, read by no seat. So the extension registers nothing at all when it cannot name a real seat.
+
+A seat is recognised when `PI_CODING_AGENT_DIR` has the shape OpenRig launches —
+`…/state/pi/<seat>/agent`, or `…/state/omp/<seat>/agent` for an Oh My Pi seat — or when
+`OPENRIG_SESSION_NAME` is set. The operator's own `~/.pi/agent` ends in `agent` too, but it is not
+under a `pi` state root and its seat-name candidate would be `.pi`, so it is not a seat and nothing
+is written.
+
 ## Failure behaviour
 
 Telemetry must not be able to break a session, so every failure is swallowed: a
 `getContextUsage()` that throws, a session manager whose getters throw, a directory that cannot be
 created, a disk that is full. The last good sample is left in place, the write reports failure
-internally, and nothing reaches the seat.
+internally, and nothing reaches the seat. The one exception is a compaction: there the retired
+reading is the thing that must not survive, so a failed read still writes the explicit unknown
+sample rather than leaving a stale percentage standing.
 
 Failures are logged only when you ask for it:
 
@@ -127,11 +153,18 @@ pi install /path/to/pi-openrig-context
 
 **One OpenRig seat, or a seat inside a container image.** A seat managed by OpenRig keeps its own Pi
 directory at `$OPENRIG_HOME/state/pi/<seat>/agent`, so its extensions directory is
-`$OPENRIG_HOME/state/pi/<seat>/agent/extensions`. Putting the file there gives exactly that seat
-the sidecar, and it is the shape a pod image or a kit would follow.
+`$OPENRIG_HOME/state/pi/<seat>/agent/extensions`. Pi's own mechanism reaches exactly that seat too:
 
-> On a machine where OpenRig is running, be deliberate about which OpenRig home and which seat you
-> install into. Installing into the operator's `~/.pi/agent` changes every Pi seat on that daemon.
+```bash
+PI_CODING_AGENT_DIR="$OPENRIG_HOME/state/pi/<seat>/agent" pi install /path/to/pi-openrig-context
+```
+
+Either way it is one seat, and it is the shape a pod image or a kit would follow.
+
+> Installing into `~/.pi/agent` changes your own plain Pi sessions, not OpenRig's seats: a managed
+> seat runs with its own `PI_CODING_AGENT_DIR` and resolves its user extensions from there. A plain
+> session that loads this extension writes nothing at all (see "No seat, no file"), so this is a
+> question of whose sessions get a reading, not of stray files.
 
 How OpenRig should deliver this extension to the seats it starts — and whether it should provision it
 automatically the way it provisions a Claude Code seat's collector — is an OpenRig-side decision, so

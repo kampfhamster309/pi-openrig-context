@@ -13,6 +13,7 @@ import extension, {
   contextUsageDirectory,
   createSidecarWriter,
   openrigHomeFromEnv,
+  seatIsManaged,
   seatNameFromEnv,
   sidecarFilename,
   writeAtomic,
@@ -187,6 +188,20 @@ test("a sample carries the shape OpenRig reads, with the reading it was given", 
   assert.ok(!Number.isNaN(Date.parse(sample.sampled_at)), "sampled_at is a parseable timestamp");
 });
 
+test("the percentage is written rounded, as Claude's and Codex's writers write it", (t) => {
+  const home = tempHome(t);
+  const writer = writerFor(home);
+  // Pi computes tokens / contextWindow * 100, which is a float. OpenRig prints used_percentage as
+  // written in `rig ps --nodes`, `rig whoami` and `rig usage`; only the TUI rounds. Whole numbers
+  // keep a Pi seat in the shape every other writer produces.
+  writer.write(fakeCtx({ tokens: 79_800, contextWindow: 200_000, percent: 39.900000000000006 }), "model_call");
+  const sample = readSample(writer.file);
+  assert.equal(sample.context_window.used_percentage, 40);
+  assert.equal(sample.context_window.remaining_percentage, 60);
+  // The exact figure is kept where it is provenance, not a display value.
+  assert.equal(sample.context_window.current_usage.percent, 39.900000000000006);
+});
+
 test("a percentage outside 0..100 is clamped, so a reader never sees -4% or 120%", (t) => {
   const home = tempHome(t);
   const low = writerFor(home);
@@ -335,6 +350,71 @@ test("a throwing getContextUsage breaks nothing and keeps the last good sample",
   assert.match(logs[0], /model_call/);
 });
 
+test("a throwing read at a compaction still retires the reading it replaces", (t) => {
+  const home = tempHome(t);
+  const logs: string[] = [];
+  const writer = createSidecarWriter({ env: seatEnv(home), log: (line) => logs.push(line) });
+  writer.write(fakeCtx({ tokens: 190_000, contextWindow: 200_000, percent: 95 }), "model_call");
+  assert.equal(readSample(writer.file).context_window.used_percentage, 95);
+
+  // The read itself fails. Nothing escapes, and the stale 95% does not survive the compaction.
+  assert.equal(writer.write(fakeCtx(undefined, { throwOnGetContextUsage: true }), "compaction"), true);
+  const sample = readSample(writer.file);
+  assert.equal(sample.context_window.used_percentage, null);
+  assert.equal(sample.context_window.context_window_size, null);
+  assert.equal(logs.length, 1, "the failed read is logged");
+});
+
+test("the reading is taken at turn_end, after Pi has saved the call it reports", (t) => {
+  const home = tempHome(t);
+  const saved = {
+    OPENRIG_HOME: process.env.OPENRIG_HOME,
+    PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+    OPENRIG_SESSION_NAME: process.env.OPENRIG_SESSION_NAME,
+  };
+  try {
+    process.env.OPENRIG_HOME = home;
+    process.env.PI_CODING_AGENT_DIR = path.join(home, "state", "pi", "dev-test", "agent");
+    process.env.OPENRIG_SESSION_NAME = "dev-test";
+
+    const pi = fakePi();
+    extension(pi);
+    const file = path.join(home, "state", "context-usage", "dev-test.json");
+
+    // Pi awaits extensions BEFORE it persists the assistant message, so at message_end the
+    // projection still lacks the call being reported. The fake reproduces that: the reading only
+    // advances when the message is saved, and turn_end is the event Pi dispatches afterwards (it
+    // refuses to fire without a persisted entry). Sampling at message_end would leave every reading
+    // one model call behind, which is what the review measured: Pi at 95%, sidecar at 40%.
+    const projection = { tokens: 80_000, contextWindow: 200_000, percent: 40 };
+    const ctx = {
+      getContextUsage: () => ({ ...projection }),
+      sessionManager: { getSessionId: () => "s", getSessionFile: () => "/s.jsonl" },
+    };
+
+    pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    assert.equal(readSample(file).context_window.used_percentage, 40);
+
+    // The model answers; the message is not saved yet, so the projection has not moved.
+    assert.ok(
+      !pi.handlers().includes("message_end"),
+      "message_end must not be sampled: the call it reports is not persisted yet",
+    );
+
+    // Pi saves the message, then dispatches turn_end with the projection moved on.
+    projection.tokens = 190_700;
+    projection.percent = 95.35;
+    pi.emit("turn_end", { type: "turn_end", message: { role: "assistant" }, willContinue: false }, ctx);
+
+    assert.equal(readSample(file).context_window.used_percentage, 95, "the current call reaches the sidecar");
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("a throwing sessionManager lookup costs only the field it guards", (t) => {
   const home = tempHome(t);
   const ctx = fakeCtx({ tokens: 10, contextWindow: 100, percent: 10 });
@@ -365,6 +445,64 @@ test("an OPENRIG_HOME that cannot hold the file is logged, not thrown", (t) => {
   assert.match(logs[0], /model_call/);
 });
 
+// -- who the writer will write for -----------------------------------------------------
+
+test("a plain Pi session writes nothing at all, not even a file under the default home", (t) => {
+  const home = tempHome(t);
+  const logs: string[] = [];
+  // No seat-shaped PI_CODING_AGENT_DIR and no OPENRIG_SESSION_NAME: the name would fall back to
+  // pi-<pid> and the home to ~/.openrig, which is a file no seat ever reads.
+  const writer = createSidecarWriter({
+    env: { HOME: home },
+    log: (line) => logs.push(line),
+  });
+  assert.equal(writer.managed, false);
+  assert.match(writer.seat, /^pi-\d+$/);
+  assert.equal(writer.write(fakeCtx({ tokens: 1, contextWindow: 100, percent: 1 }), "model_call"), false);
+  assert.equal(writer.write(fakeCtx({ tokens: 1, contextWindow: 100, percent: 1 }), "session_start"), false);
+  assert.equal(realFs.existsSync(contextUsageDirectory(home)), false, "no directory is created either");
+});
+
+test("the operator's own ~/.pi/agent is not a seat, even though it ends in `agent`", (t) => {
+  const home = tempHome(t);
+  const plain = { HOME: home, PI_CODING_AGENT_DIR: path.join(home, ".pi", "agent") };
+  assert.equal(seatIsManaged(plain), false);
+  const writer = createSidecarWriter({ env: plain });
+  assert.equal(writer.managed, false);
+  assert.equal(writer.write(fakeCtx({ tokens: 1, contextWindow: 100, percent: 1 }), "model_call"), false);
+  assert.equal(realFs.existsSync(contextUsageDirectory(home)), false);
+});
+
+test("seatIsManaged accepts the shapes OpenRig launches and rejects the ones it does not", () => {
+  assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/h/state/pi/dev-build@my-rig/agent" }), true);
+  assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/h/state/omp/dev-build@my-rig/agent" }), true);
+  assert.equal(seatIsManaged({ OPENRIG_SESSION_NAME: "solo-seat" }), true);
+  // A plain session's own agent directory, and anything that is not under a pi/omp state root.
+  assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/home/op/.pi/agent" }), false);
+  assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/somewhere/else/agent" }), false);
+  assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/h/state/pi/.hidden/agent" }), false);
+  assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/h/state/pi/agent" }), false);
+  assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "", OPENRIG_SESSION_NAME: "" }), false);
+  assert.equal(seatIsManaged({}), false);
+});
+
+test("the extension registers nothing for a plain Pi session", () => {
+  const saved = { HOME: process.env.HOME, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, OPENRIG_SESSION_NAME: process.env.OPENRIG_SESSION_NAME, OPENRIG_HOME: process.env.OPENRIG_HOME };
+  try {
+    process.env.PI_CODING_AGENT_DIR = "/home/op/.pi/agent";
+    delete process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_HOME = "/home/op/.openrig";
+    const pi = fakePi();
+    extension(pi);
+    assert.deepEqual(pi.handlers(), [], "no handlers, so no file can be written");
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 // -- how often it writes ---------------------------------------------------------------
 
 test("the same reading twice in a row is one write; a changed reading always writes", (t) => {
@@ -386,7 +524,7 @@ test("the same reading twice in a row is one write; a changed reading always wri
 
 // -- the extension's own registration --------------------------------------------------
 
-test("the extension registers session start, model calls and compaction, and its handlers never throw", (t) => {
+test("the extension registers session start, turn end and compaction, and its handlers never throw", (t) => {
   const home = tempHome(t);
   const saved = {
     OPENRIG_HOME: process.env.OPENRIG_HOME,
@@ -410,27 +548,29 @@ test("the extension registers session start, model calls and compaction, and its
   extension(pi);
   assert.deepEqual(
     [...pi.handlers()].sort(),
-    ["message_end", "session_compact", "session_start"],
+    ["session_compact", "session_start", "turn_end"],
   );
 
   const good = fakeCtx({ tokens: 10, contextWindow: 100, percent: 10 });
   const bad = fakeCtx(undefined, { throwOnGetContextUsage: true });
   const file = path.join(home, "state", "context-usage", "dev-test.json");
 
-  pi.emit("session_start", {}, good);
+  pi.emit("session_start", { type: "session_start", reason: "startup" }, good);
   assert.equal(readSample(file).context_window.used_percentage, 10);
 
-  // A non-assistant message end is not a model call.
-  pi.emit("message_end", { message: { role: "user" } }, good);
-  assert.equal(realFs.readdirSync(path.dirname(file)).length, 1);
-
-  pi.emit("message_end", { message: { role: "assistant" } }, fakeCtx({ tokens: 90, contextWindow: 100, percent: 90 }));
+  pi.emit(
+    "turn_end",
+    { type: "turn_end", message: { role: "assistant" }, willContinue: false },
+    fakeCtx({ tokens: 90, contextWindow: 100, percent: 90 }),
+  );
   assert.equal(readSample(file).context_window.used_percentage, 90);
 
+  pi.emit("session_compact", { type: "session_compact", reason: "manual", willRetry: false }, good);
+
   for (const ctx of [bad, undefined, {}, fakeCtx(undefined)]) {
-    assert.doesNotThrow(() => pi.emit("session_start", {}, ctx));
-    assert.doesNotThrow(() => pi.emit("message_end", { message: { role: "assistant" } }, ctx));
-    assert.doesNotThrow(() => pi.emit("session_compact", {}, ctx));
+    assert.doesNotThrow(() => pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx));
+    assert.doesNotThrow(() => pi.emit("turn_end", { type: "turn_end", willContinue: false }, ctx));
+    assert.doesNotThrow(() => pi.emit("session_compact", { type: "session_compact", reason: "manual" }, ctx));
   }
 });
 
