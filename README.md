@@ -149,6 +149,13 @@ Lines go to stderr as `[openrig][context-usage] …`. Without that variable the 
 Any of these is enough; pick the scope you want. Pi loads TypeScript extensions directly, so there is
 nothing to build.
 
+Get it first:
+
+```bash
+git clone https://github.com/kampfhamster309/pi-openrig-context
+cd pi-openrig-context
+```
+
 **One run, to try it:**
 
 ```bash
@@ -165,7 +172,7 @@ cp extensions/openrig-context-usage.ts ~/.pi/agent/extensions/
 **As a package** (this repository is a Pi package; `package.json` declares the extension):
 
 ```bash
-pi install /path/to/pi-openrig-context
+pi install .
 ```
 
 **One OpenRig seat, or a seat inside a container image.** A seat managed by OpenRig keeps its own Pi
@@ -173,7 +180,7 @@ directory at `$OPENRIG_HOME/state/pi/<seat>/agent`, so its extensions directory 
 `$OPENRIG_HOME/state/pi/<seat>/agent/extensions`. Pi's own mechanism reaches exactly that seat too:
 
 ```bash
-PI_CODING_AGENT_DIR="$OPENRIG_HOME/state/pi/<seat>/agent" pi install /path/to/pi-openrig-context
+PI_CODING_AGENT_DIR="$OPENRIG_HOME/state/pi/<seat>/agent" pi install .
 ```
 
 Either way it is one seat, and it is the shape a pod image or a kit would follow.
@@ -183,10 +190,19 @@ Either way it is one seat, and it is the shape a pod image or a kit would follow
 > session that loads this extension writes nothing at all (see "No seat, no file"), so this is a
 > question of whose sessions get a reading, not of stray files.
 
-How OpenRig should deliver this extension to the seats it starts — and whether it should provision it
-automatically the way it provisions a Claude Code seat's collector — is an OpenRig-side decision, so
-this repository does not assume an answer. OpenRig does not depend on this repository in any
-direction; the sidecar file is the entire interface.
+This extension is an optional customization, like a `models.json` for a local model: OpenRig neither
+ships nor installs it, and a seat without it simply shows no context reading. OpenRig does not depend
+on this repository in any direction; the sidecar file is the entire interface.
+
+**In an OpenRig Kubernetes team pod**, add it the way the kit's `pi/models.json` and heartbeat
+extension are added: copy `extensions/openrig-context-usage.ts` into the kit's `pi-extensions/` and
+list it in `kustomization.yaml` next to the heartbeat:
+
+```yaml
+      - openrig-context-usage.ts=kit/pi-extensions/openrig-context-usage.ts
+```
+
+The entrypoint copies every `pi-extensions/*.ts` into each Pi seat.
 
 ## Verify it
 
