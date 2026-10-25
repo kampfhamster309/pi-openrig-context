@@ -68,14 +68,43 @@ export function contextUsageDirectory(openrigHome: string): string {
   return nodePath.join(openrigHome, "state", "context-usage");
 }
 
-/** The seat name, found the way the OpenRig heartbeat extension finds it: OpenRig sets
- *  `PI_CODING_AGENT_DIR` to `$OPENRIG_HOME/state/pi/<seat>/agent`, so the grandparent directory
- *  name is the seat. `OPENRIG_SESSION_NAME` covers a seat launched without that directory, and the
- *  pid keeps a plain Pi session (no OpenRig) from writing under somebody else's name. */
-export function seatNameFromEnv(env: Record<string, string | undefined>): string {
+/** The runtimes whose seats this extension may write for. A seat launched under any other runtime
+ *  is not ours to write for, whatever it inherited. */
+const MANAGED_RUNTIMES = new Set(["pi", "omp"]);
+
+/** The seat this process may write a sidecar for, or undefined for "no seat".
+ *
+ *  OpenRig points a Pi seat at `$OPENRIG_HOME/state/pi/<seat>/agent` (an omp seat uses
+ *  `state/omp/<seat>/agent`), so the seat directory sits directly under a `pi` or `omp` state root and
+ *  the grandparent directory name is the seat. An omp seat has no `PI_CODING_AGENT_DIR`, so
+ *  `OPENRIG_SESSION_NAME` covers it - but only when `OPENRIG_RUNTIME` says the seat is a Pi or omp one,
+ *  because the launcher sets that name in **every** seat's environment, for every runtime
+ *  (`seat-launch-environment.ts`). Without the runtime check, a plain `pi` started inside a Claude
+ *  seat's shell inherits the Claude seat's name and overwrites the sidecar OpenRig reads as Claude's
+ *  own data. */
+export function seatNameIfManaged(env: Record<string, string | undefined>): string | undefined {
   const dir = env.PI_CODING_AGENT_DIR;
-  if (dir && nodePath.basename(dir) === "agent") return nodePath.basename(nodePath.dirname(dir));
-  return env.OPENRIG_SESSION_NAME || `pi-${process.pid}`;
+  if (dir && nodePath.basename(dir) === "agent") {
+    const seatDir = nodePath.dirname(dir);
+    const seat = nodePath.basename(seatDir);
+    const root = nodePath.basename(nodePath.dirname(seatDir));
+    if ((root === "pi" || root === "omp") && seat !== "" && !seat.startsWith(".")) return seat;
+    // A non-seat-shaped agent dir is not a seat, and its grandparent is not a seat name. This
+    // deliberately departs from the heartbeat extension's naming fallback: the heartbeat writes a
+    // different, harmless file, while a sidecar under a borrowed name is read as another seat's data.
+    return undefined;
+  }
+  const name = env.OPENRIG_SESSION_NAME;
+  if (nonEmptyString(name) && MANAGED_RUNTIMES.has((env.OPENRIG_RUNTIME ?? "").trim())) {
+    return name.trim();
+  }
+  return undefined;
+}
+
+/** The seat name, or a pid-scoped one when there is no seat. Nothing is written without a seat, so
+ *  the fallback only keeps a name from being `undefined` in a log line. */
+export function seatNameFromEnv(env: Record<string, string | undefined>): string {
+  return seatNameIfManaged(env) ?? `pi-${process.pid}`;
 }
 
 /** True when the environment names a seat somebody will read.
@@ -87,19 +116,12 @@ export function seatNameFromEnv(env: Record<string, string | undefined>): string
  *
  *  The shape matters. OpenRig points a seat at `$OPENRIG_HOME/state/pi/<seat>/agent` (an omp seat
  *  uses `state/omp/<seat>/agent`), so the seat directory sits directly under a `pi` or `omp` state
- *  root. The operator's own `~/.pi/agent` ends in `agent` too, but its seat-name candidate would be
- *  `.pi` - a dot-directory, and not under a `pi` root - so it is not a seat. Requiring the root
- *  segment is what keeps a plain session from writing one file per run into the operator's real
- *  `~/.openrig`. */
+ *  root. The operator's own `~/.pi/agent` ends in `agent` too, but it is not under a `pi` root, so it
+ *  is not a seat. Requiring the root segment is what keeps a plain session from writing one file per
+ *  run into the operator's real `~/.openrig`. An inherited `OPENRIG_SESSION_NAME` counts only under a
+ *  `pi` or `omp` runtime - see `seatNameIfManaged`. */
 export function seatIsManaged(env: Record<string, string | undefined>): boolean {
-  const dir = env.PI_CODING_AGENT_DIR;
-  if (dir && nodePath.basename(dir) === "agent") {
-    const seatDir = nodePath.dirname(dir);
-    const seat = nodePath.basename(seatDir);
-    const root = nodePath.basename(nodePath.dirname(seatDir));
-    if ((root === "pi" || root === "omp") && seat !== "" && !seat.startsWith(".")) return true;
-  }
-  return Boolean(nonEmptyString(env.OPENRIG_SESSION_NAME));
+  return seatNameIfManaged(env) !== undefined;
 }
 
 export function openrigHomeFromEnv(env: Record<string, string | undefined>): string {

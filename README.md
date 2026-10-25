@@ -100,15 +100,23 @@ nothing at all, so a good sample is never replaced by an empty one.
 ## No seat, no file
 
 A plain Pi session that loaded this extension from a user extensions directory is not an OpenRig
-seat: it has no seat-shaped `PI_CODING_AGENT_DIR` and no `OPENRIG_SESSION_NAME`. Writing anyway would
-put a file named `pi-<pid>.json` under `~/.openrig/state/context-usage/` — one per process, never
-cleaned, read by no seat. So the extension registers nothing at all when it cannot name a real seat.
+seat. Writing anyway would put a file named `pi-<pid>.json` under `~/.openrig/state/context-usage/`
+— one per process, never cleaned, read by no seat. So the extension registers nothing at all when it
+cannot name a real seat.
 
 A seat is recognised when `PI_CODING_AGENT_DIR` has the shape OpenRig launches —
 `…/state/pi/<seat>/agent`, or `…/state/omp/<seat>/agent` for an Oh My Pi seat — or when
-`OPENRIG_SESSION_NAME` is set. The operator's own `~/.pi/agent` ends in `agent` too, but it is not
-under a `pi` state root and its seat-name candidate would be `.pi`, so it is not a seat and nothing
-is written.
+`OPENRIG_SESSION_NAME` is set **and** `OPENRIG_RUNTIME` is `pi` or `omp`. The operator's own
+`~/.pi/agent` ends in `agent` too, but it is not under a `pi` state root, so it is not a seat and
+nothing is written.
+
+The runtime check is there because OpenRig sets `OPENRIG_SESSION_NAME` in *every* seat's environment,
+for every runtime. A plain `pi` started from inside a Claude Code seat's shell therefore inherits that
+seat's name; taking it would overwrite the sidecar OpenRig reads as that Claude seat's own usage, and a
+wrong-but-plausible number is worse than none. So an inherited name counts only under a Pi or omp
+runtime, and a non-seat-shaped `PI_CODING_AGENT_DIR` never lends its grandparent directory name. This
+deliberately departs from the heartbeat extension's naming fallback: the heartbeat writes a different,
+harmless file, while a sidecar under a borrowed name is read as another seat's data.
 
 ## Failure behaviour
 

@@ -14,6 +14,7 @@ import extension, {
   createSidecarWriter,
   openrigHomeFromEnv,
   seatIsManaged,
+  seatNameIfManaged,
   seatNameFromEnv,
   sidecarFilename,
   writeAtomic,
@@ -143,13 +144,19 @@ test("the seat name is found the way the heartbeat extension finds it", () => {
     seatNameFromEnv({ PI_CODING_AGENT_DIR: "/h/state/pi/dev-build@my-rig/agent" }),
     "dev-build@my-rig",
   );
-  // A directory that is not a seat's agent dir does not name a seat; the session name does.
-  assert.equal(seatNameFromEnv({ PI_CODING_AGENT_DIR: "/h/state/pi", OPENRIG_SESSION_NAME: "s" }), "s");
-  assert.equal(seatNameFromEnv({ OPENRIG_SESSION_NAME: "solo-seat" }), "solo-seat");
+  // A directory that is not a seat's agent dir does not name a seat; a Pi runtime's session name does.
+  assert.equal(
+    seatNameFromEnv({ PI_CODING_AGENT_DIR: "/h/state/pi", OPENRIG_SESSION_NAME: "s", OPENRIG_RUNTIME: "pi" }),
+    "s",
+  );
+  assert.equal(seatNameFromEnv({ OPENRIG_SESSION_NAME: "solo-seat", OPENRIG_RUNTIME: "pi" }), "solo-seat");
+  assert.equal(seatNameFromEnv({ OPENRIG_SESSION_NAME: "solo-seat", OPENRIG_RUNTIME: "omp" }), "solo-seat");
   assert.match(seatNameFromEnv({}), /^pi-\d+$/);
-  // A path ending in `agent` always names the seat, whatever is above it — the heartbeat's rule,
-  // kept identical so the two extensions never disagree about who a sample belongs to.
-  assert.equal(seatNameFromEnv({ PI_CODING_AGENT_DIR: "/h/pi/agent", OPENRIG_SESSION_NAME: "s" }), "pi");
+  // A path ending in `agent` names the seat only under a pi/omp state root. Elsewhere the grandparent is
+  // NOT taken as the seat name - this departs from the heartbeat's rule on purpose, because a sidecar
+  // under a borrowed name is read as another seat's data.
+  assert.match(seatNameFromEnv({ PI_CODING_AGENT_DIR: "/h/pi/agent", OPENRIG_SESSION_NAME: "s" }), /^pi-\d+$/);
+  assert.equal(seatNameIfManaged({ PI_CODING_AGENT_DIR: "/h/pi/agent", OPENRIG_SESSION_NAME: "s" }), undefined);
   assert.equal(openrigHomeFromEnv({ OPENRIG_HOME: "/h" }), "/h");
 });
 
@@ -476,7 +483,12 @@ test("the operator's own ~/.pi/agent is not a seat, even though it ends in `agen
 test("seatIsManaged accepts the shapes OpenRig launches and rejects the ones it does not", () => {
   assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/h/state/pi/dev-build@my-rig/agent" }), true);
   assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/h/state/omp/dev-build@my-rig/agent" }), true);
-  assert.equal(seatIsManaged({ OPENRIG_SESSION_NAME: "solo-seat" }), true);
+  assert.equal(seatIsManaged({ OPENRIG_SESSION_NAME: "solo-seat", OPENRIG_RUNTIME: "pi" }), true);
+  assert.equal(seatIsManaged({ OPENRIG_SESSION_NAME: "solo-seat", OPENRIG_RUNTIME: "omp" }), true);
+  // An inherited session name under a runtime that is not ours is not a seat for this extension.
+  assert.equal(seatIsManaged({ OPENRIG_SESSION_NAME: "claude-seat@rig", OPENRIG_RUNTIME: "claude-code" }), false);
+  assert.equal(seatIsManaged({ OPENRIG_SESSION_NAME: "x@rig", OPENRIG_RUNTIME: "codex" }), false);
+  assert.equal(seatIsManaged({ OPENRIG_SESSION_NAME: "x@rig" }), false);
   // A plain session's own agent directory, and anything that is not under a pi/omp state root.
   assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/home/op/.pi/agent" }), false);
   assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/somewhere/else/agent" }), false);
@@ -484,6 +496,47 @@ test("seatIsManaged accepts the shapes OpenRig launches and rejects the ones it 
   assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "/h/state/pi/agent" }), false);
   assert.equal(seatIsManaged({ PI_CODING_AGENT_DIR: "", OPENRIG_SESSION_NAME: "" }), false);
   assert.equal(seatIsManaged({}), false);
+});
+
+test("a plain pi inside another seat's shell never writes that seat's sidecar (R-1)", (t) => {
+  const home = tempHome(t);
+  // Exactly what a `pi` started from inside a Claude seat's shell inherits: the launcher sets all of
+  // these in every seat's environment, for every runtime.
+  const inherited = {
+    HOME: home,
+    OPENRIG_HOME: home,
+    OPENRIG_SESSION_NAME: "dev-build@my-rig",
+    OPENRIG_RUNTIME: "claude-code",
+  };
+  // The Claude seat's own sidecar, written by Claude's collector. The nested session must not touch it.
+  const dir = contextUsageDirectory(home);
+  realFs.mkdirSync(dir, { recursive: true });
+  const claudeFile = path.join(dir, "dev-build@my-rig.json");
+  const before = JSON.stringify({ context_window: { used_percentage: 42 } });
+  realFs.writeFileSync(claudeFile, before);
+
+  assert.equal(seatIsManaged(inherited), false, "a claude-code runtime is not this extension's seat");
+  const writer = createSidecarWriter({ env: inherited });
+  assert.equal(writer.managed, false);
+  assert.equal(writer.write(fakeCtx({ tokens: 1, contextWindow: 100, percent: 99 }), "model_call"), false);
+  assert.equal(realFs.readFileSync(claudeFile, "utf8"), before, "the Claude seat's sidecar is untouched");
+});
+
+test("~/.pi/agent with an inherited session name writes no .pi.json (R-1)", (t) => {
+  const home = tempHome(t);
+  const env = {
+    HOME: home,
+    OPENRIG_HOME: home,
+    PI_CODING_AGENT_DIR: path.join(home, ".pi", "agent"),
+    OPENRIG_SESSION_NAME: "dev-build@my-rig",
+    OPENRIG_RUNTIME: "pi",
+  };
+  assert.equal(seatIsManaged(env), false, "a non-seat-shaped agent dir is not a seat");
+  const writer = createSidecarWriter({ env });
+  assert.equal(writer.managed, false);
+  assert.equal(writer.write(fakeCtx({ tokens: 1, contextWindow: 100, percent: 1 }), "model_call"), false);
+  assert.equal(realFs.existsSync(path.join(contextUsageDirectory(home), ".pi.json")), false);
+  assert.equal(realFs.existsSync(contextUsageDirectory(home)), false, "no directory is created either");
 });
 
 test("the extension registers nothing for a plain Pi session", () => {
