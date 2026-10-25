@@ -1,6 +1,7 @@
 {
   "name": "pi-openrig-context",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Pi extension that publishes a seat's context usage to the OpenRig context-usage sidecar",
   "type": "module",
   "private": true,

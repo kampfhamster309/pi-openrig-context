@@ -175,3 +175,7 @@ Node 22.6 or newer (the tests use Node's built-in test runner with TypeScript ty
 extensions/openrig-context-usage.ts   the extension
 test/openrig-context-usage.test.ts    the tests
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
