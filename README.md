@@ -118,6 +118,15 @@ runtime, and a non-seat-shaped `PI_CODING_AGENT_DIR` never lends its grandparent
 deliberately departs from the heartbeat extension's naming fallback: the heartbeat writes a different,
 harmless file, while a sidecar under a borrowed name is read as another seat's data.
 
+**Known limit, and it cannot be closed from inside the extension.** A nested `pi` started *inside a Pi
+seat's own shell* inherits that seat's `PI_CODING_AGENT_DIR`, `OPENRIG_SESSION_NAME` **and**
+`OPENRIG_RUNTIME=pi`, so it is indistinguishable from the seat itself and writes as that seat. The
+runtime check in R-1 stops a *Claude* or *Codex* seat's shell from being impersonated; it cannot stop a
+Pi seat's shell from being impersonated by its own child, because the environment genuinely carries the
+same values. Nothing in the environment separates "the seat" from "a Pi the seat launched". The practical
+caveat: do not run a plain `pi` with this extension installed inside a Pi seat that also has it, or the
+child's reading will overwrite the seat's.
+
 ## Failure behaviour
 
 Telemetry must not be able to break a session, so every failure is swallowed: a

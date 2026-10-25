@@ -76,8 +76,8 @@ const MANAGED_RUNTIMES = new Set(["pi", "omp"]);
  *
  *  OpenRig points a Pi seat at `$OPENRIG_HOME/state/pi/<seat>/agent` (an omp seat uses
  *  `state/omp/<seat>/agent`), so the seat directory sits directly under a `pi` or `omp` state root and
- *  the grandparent directory name is the seat. An omp seat has no `PI_CODING_AGENT_DIR`, so
- *  `OPENRIG_SESSION_NAME` covers it - but only when `OPENRIG_RUNTIME` says the seat is a Pi or omp one,
+ *  the grandparent directory name is the seat. `OPENRIG_SESSION_NAME` is the fallback for a seat
+ *  launched without that directory - but only when `OPENRIG_RUNTIME` says the seat is a Pi or omp one,
  *  because the launcher sets that name in **every** seat's environment, for every runtime
  *  (`seat-launch-environment.ts`). Without the runtime check, a plain `pi` started inside a Claude
  *  seat's shell inherits the Claude seat's name and overwrites the sidecar OpenRig reads as Claude's
